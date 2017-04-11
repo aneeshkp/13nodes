@@ -1,0 +1,8 @@
+[Unit]
+Description=Zookeeper Service
+[Service]
+Type=simple
+User=root
+ExecStart= /usr/share/kafka/bin/zookeeper-server-start.sh  /usr/share/kafka/config/zookeeper.properties
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+mgt-sw2.oot.lab.eng.bos
+mgt-sw1.oot.lab.eng.bos
+cable mgmt
+ctl-sw2.oot.lab.eng.bos
+ctl-sw1.oot.lab.eng.bos
+cable mgmt
+dpl-sw2.oot.lab.eng.bos
+dpl-sw1.oot.lab.eng.bos
