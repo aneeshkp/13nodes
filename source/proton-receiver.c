@@ -165,8 +165,10 @@ static void display_latency(app_data_t *data)
     }
 
     unsigned power = 1;
-    for (int order = 0; order < MAX_ORDER; ++order) {
-        for (int i = 0; i < 100; ++i) {
+    int order;
+    int i;
+    for (order = 0; order < MAX_ORDER; ++order) {
+        for ( i = 0; i < 100; ++i) {
             if (data->distribution[order][i] > 0) {
                 if (data->dump_csv) {
                     printf("%u, %u\n",
