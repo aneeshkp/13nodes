@@ -52,8 +52,7 @@
                         } while (0)
 
 
-static void
-fatal (const char *str)
+static void fatal (const char *str)
 {
   perror (str);
   fflush (stderr);
@@ -68,8 +67,7 @@ stop (int sig)
 }
 
 // return wall clock time not in msec but in usec
-static time_t
-now ()
+static time_t now ()
 {
   struct timeval tv;
   int rc = gettimeofday (&tv, NULL);
@@ -93,6 +91,7 @@ typedef struct
   const char *target;
   uint32_t display_interval_sec;
   int latency;
+  long int last_then; 
   int dump_csv;
   pn_link_t *receiver;
   char *decode_buffer;
@@ -115,8 +114,7 @@ typedef struct
 
 // Called when reactor exits to clean up app_data
 //
-static void
-delete_handler (pn_handler_t * handler)
+static void delete_handler (pn_handler_t * handler)
 {
   app_data_t *app_data = GET_APP_DATA (handler);
   if (app_data->receiver)
@@ -134,8 +132,7 @@ delete_handler (pn_handler_t * handler)
   free (app_data->decode_buffer);
 }
 
-static char *
-formatLocaltime (time_t _time)
+static char * formatLocaltime (time_t _time)
 {
   char *buffer = malloc (sizeof (char) * 26);
   // char buffer[26];
@@ -146,12 +143,15 @@ formatLocaltime (time_t _time)
   return buffer;
 }
 
-static void
-print_latency (app_data_t * data, time_t msecs, time_t then, time_t now)
+static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t now)
 {
 
 
   static int rows_written = 0;
+  long int pause_time=0;
+  if(data->last_then)
+     pause_time=then-data->last_then;
+     data->last_then=then;
 
 
   if (!rows_written)
@@ -162,6 +162,7 @@ print_latency (app_data_t * data, time_t msecs, time_t then, time_t now)
       COL_HDR ("COUNT");
       COL_HDR ("THEN");
       COL_HDR ("NOW");
+      COL_HDR("PAUSE_TIME");
       COL_HDR ("LATENCY");
       ROW_END ();
 
@@ -178,6 +179,7 @@ print_latency (app_data_t * data, time_t msecs, time_t then, time_t now)
   COL_INT ("count", rows_written);
   COL_TIME ("then_msecs", then);
   COL_TIME ("now_msecs", now);
+  COL_TIME ("pause_time",pause_time);
   COL_TIME ("latency", msecs);
   ROW_END ();
   //fprintf(stdout, "latency %ld\n message: %s", msecs,buffer);
@@ -189,8 +191,7 @@ print_latency (app_data_t * data, time_t msecs, time_t then, time_t now)
 
 }
 
-static void
-update_latency (app_data_t * data, time_t msecs)
+static void update_latency (app_data_t * data, time_t msecs)
 {
   if (data->debug)
     fprintf (stdout, "latency %ld\n", msecs);
@@ -224,8 +225,7 @@ update_latency (app_data_t * data, time_t msecs)
 }
 
 
-static void
-display_latency (app_data_t * data)
+static void display_latency (app_data_t * data)
 {
   static unsigned long last_count = 0;
 
@@ -289,8 +289,7 @@ display_latency (app_data_t * data)
 /* Process interesting events posted by the reactor.
  * This is called from pn_reactor_process()
  */
-static void
-event_handler (pn_handler_t * handler,
+static void event_handler (pn_handler_t * handler,
 	       pn_event_t * event, pn_event_type_t type)
 {
   app_data_t *data = GET_APP_DATA (handler);
@@ -423,8 +422,7 @@ event_handler (pn_handler_t * handler,
     }
 }
 
-static void
-usage (const char *name)
+static void usage (const char *name)
 {
   printf ("Usage: %s <options>\n", name);
   printf ("-a \tThe host address [localhost:5672]\n");
@@ -439,8 +437,7 @@ usage (const char *name)
 
 
 /* parse command line options */
-static int
-parse_args (int argc, char *argv[], app_data_t * app)
+static int parse_args (int argc, char *argv[], app_data_t * app)
 {
   int c;
 
@@ -516,8 +513,7 @@ parse_args (int argc, char *argv[], app_data_t * app)
 }
 
 
-int
-main (int argc, char *argv[])
+int main (int argc, char *argv[])
 {
   pn_reactor_t *reactor = NULL;
   pn_url_t *url = NULL;
