@@ -57,8 +57,7 @@ static time_t now()
     struct timeval tv;
     int rc = gettimeofday(&tv, NULL);
     if (rc) fatal("gettimeofday() failed");
-   return (tv.tv_sec * 1000) + (time_t)(tv.tv_usec / 1000);
-   // return ((uint64_t)tv.tv_sec * 1000000LLU) +((uint64_t)tv.tv_usec);
+    return (tv.tv_sec * 1000) + (time_t)(tv.tv_usec / 1000);
 }
 
 
@@ -420,45 +419,21 @@ int main(int argc, char *argv[])
     pn_reactor_set_timeout(reactor, 0);
     pn_reactor_start(reactor);
 
-    //time_t next_transmit = now();
+    time_t next_transmit = now();
     // pn_reactor_process() returns 'true' until the connection is shut down.
-       while (!done && pn_reactor_process(reactor)) { 
-        if (app_data->send_count && send_message(app_data) > 0) {
-                // message sent, update deadline for next transmit
-                //random sleep in millsec 
-                int randomTime=rand()%1000+10;
-                int remainder = randomTime % 10;
-                int sleep=1000;
-                if (remainder==0)
-                   sleep=randomTime;
-                 else
-                   sleep=randomTime-remainder;
-                   printf("Sleep Time %d\n",sleep);
-                   pn_reactor_set_timeout(reactor, sleep);
-                   #ifdef _MSC_VE 
-                     Sleep(sleep);
-                   #else  
-                     usleep(sleep*1000);  
-                   #endif
-                  if (app_data->send_count > 0 && --app_data->send_count == 0) {
-                    // this starts the shutdown process
-                    pn_link_close(app_data->sender);
-                }
-
-           }
-       }
-
-
-   /* while (!done && pn_reactor_process(reactor)) {
-        if (now() >= next_transmit) {
+    while (!done && pn_reactor_process(reactor)) {
+        time_t n = now();
+        if (n >= next_transmit) {
             // pause interval expired, send a message
             if (app_data->send_count && send_message(app_data) > 0) {
                 // message sent, update deadline for next transmit
                 unsigned int pause = 0;
                 if (app_data->pause_max_msec)
                     pause = rand() % app_data->pause_max_msec;
-                if (pause < app_data->pause_min_msec)
-                    pause = app_data->pause_min_msec;
+                if (app_data->pause_min_msec) {
+                    pause += app_data->pause_min_msec;
+                    pause -= pause % app_data->pause_min_msec;
+                }
                 pn_reactor_set_timeout(reactor, pause);
                 if (app_data->debug)
                     fprintf(stdout, "Random delay: %u msec\n", pause);
@@ -469,8 +444,11 @@ int main(int argc, char *argv[])
                     pn_link_close(app_data->sender);
                 }
             }
+        } else {
+            // adjust timeout to account for elapsed time
+            pn_reactor_set_timeout(reactor, next_transmit - n);
         }
-    }*/
+    }
     pn_decref(reactor);
 
     return 0;
