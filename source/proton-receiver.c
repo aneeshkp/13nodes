@@ -25,6 +25,7 @@
 #include <limits.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <errno.h>
 
 #include "proton/reactor.h"
 #include "proton/message.h"
@@ -54,9 +55,13 @@
 
 static void fatal (const char *str)
 {
-  perror (str);
-  fflush (stderr);
-  abort ();
+  if (errno)
+    perror(str);
+  else
+    fprintf(stderr, "Error: %s\n", str);
+
+  fflush(stderr);
+  exit(1);
 }
 
 static int done = 0;
@@ -97,6 +102,7 @@ typedef struct
   char *decode_buffer;
   size_t buffer_len;
   pn_message_t *message;
+  time_t start;
   unsigned long received_count;
   // these are all in msec
   float max_latency;
@@ -151,7 +157,7 @@ static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t 
   long int pause_time=0;
   if(data->last_then)
      pause_time=then-data->last_then;
-     data->last_then=then;
+  data->last_then=then;
 
 
   if (!rows_written)
@@ -316,6 +322,13 @@ static void event_handler (pn_handler_t * handler,
       }
       break;
 
+    case PN_LINK_REMOTE_OPEN:
+      {
+        // discard any messages generated before the link becomes active
+        data->start = now();
+      }
+      break;
+
     case PN_LINK_REMOTE_CLOSE:
       {
 	// shutdown - clean up connection and session
@@ -360,7 +373,7 @@ static void event_handler (pn_handler_t * handler,
 		      {
 			time_t _then =
 			  pn_message_get_creation_time (data->message);
-			if (_then && _now >= _then)
+			if (_then && _then >= data->start &&_now >= _then)
 			  {
 			    print_latency (data, _now - _then, _then, _now);
 			    update_latency (data, _now - _then);
@@ -519,6 +532,7 @@ int main (int argc, char *argv[])
   pn_url_t *url = NULL;
   pn_connection_t *conn = NULL;
 
+  errno = 0;
   signal (SIGINT, stop);
 
   /* Create a handler for the connection's events.  event_handler() will be
