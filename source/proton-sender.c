@@ -422,15 +422,18 @@ int main(int argc, char *argv[])
     time_t next_transmit = now();
     // pn_reactor_process() returns 'true' until the connection is shut down.
     while (!done && pn_reactor_process(reactor)) {
-        if (now() >= next_transmit) {
+        time_t n = now();
+        if (n >= next_transmit) {
             // pause interval expired, send a message
             if (app_data->send_count && send_message(app_data) > 0) {
                 // message sent, update deadline for next transmit
                 unsigned int pause = 0;
                 if (app_data->pause_max_msec)
                     pause = rand() % app_data->pause_max_msec;
-                if (pause < app_data->pause_min_msec)
-                    pause = app_data->pause_min_msec;
+                if (app_data->pause_min_msec) {
+                    pause += app_data->pause_min_msec;
+                    pause -= pause % app_data->pause_min_msec;
+                }
                 pn_reactor_set_timeout(reactor, pause);
                 if (app_data->debug)
                     fprintf(stdout, "Random delay: %u msec\n", pause);
@@ -441,6 +444,9 @@ int main(int argc, char *argv[])
                     pn_link_close(app_data->sender);
                 }
             }
+        } else {
+            // adjust timeout to account for elapsed time
+            pn_reactor_set_timeout(reactor, next_transmit - n);
         }
     }
     pn_decref(reactor);
