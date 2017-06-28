@@ -151,7 +151,7 @@ static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t 
   long int pause_time=0;
   if(data->last_then)
      pause_time=then-data->last_then;
-     data->last_then=then;
+  data->last_then=then;
 
 
   if (!rows_written)
