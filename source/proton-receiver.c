@@ -37,7 +37,6 @@
 #include "proton/transport.h"
 #include "proton/url.h"
 #include <time.h>
-#include <math.h>
 
 #define ROW_START()        do {} while (0)
 
@@ -45,6 +44,7 @@
 
 #define COL_INT(NAME,VAL)  printf("| %20d", (VAL))
 #define COL_TIME(NAME,VAL) printf("| %20ld ", (VAL))
+#define COL_CLOCK(NAME,VALS,VALD) printf("| %20s.%ld",(VALS),(VALD))
 #define COL_STR(NAME,VAL)  printf("| %20s ", (VAL))
 #define ROW_END()     do {                 \
                                 printf("\n");   \
@@ -69,12 +69,11 @@ stop (int sig)
 // return wall clock time not in msec but in usec
 static time_t now ()
 {
-  struct timeval tv;
-  int rc = gettimeofday (&tv, NULL);
-  if (rc)
-    fatal ("gettimeofday() failed");
-  return (tv.tv_sec * 1000) + (time_t) (tv.tv_usec / 1000);
-  //return ((uint64_t)tv.tv_sec * 1000000LLU) +((uint64_t)tv.tv_usec);
+  
+    struct timeval tv;
+    int rc = gettimeofday(&tv, NULL);
+    if (rc) fatal("gettimeofday() failed");
+    return (tv.tv_sec * 1000) + (time_t)(tv.tv_usec / 1000);
 }
 
 
@@ -132,15 +131,16 @@ static void delete_handler (pn_handler_t * handler)
   free (app_data->decode_buffer);
 }
 
-static char * formatLocaltime (time_t _time)
+static void formatLocaltime (unsigned long long  _time)
 {
-  char *buffer = malloc (sizeof (char) * 26);
-  // char buffer[26];
-  struct tm *tm_info;
-  time (&_time);
-  tm_info = localtime (&_time);
-  strftime (buffer, 26, "%Y:%m:%d %H:%M:%S", tm_info);
-  return buffer;
+   time_t l_time;
+   l_time=_time/1000;
+   char *timestamp = malloc (sizeof (char) * 64);
+   strftime(timestamp , 64, "%c", localtime(&l_time));
+  //strftime(timestamp , 64, "%Y:%m:%d %H:%M:%S", localtime(&l_time));
+   printf("| %20s.%llu",timestamp,_time%1000);
+
+  
 }
 
 static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t now)
@@ -172,22 +172,15 @@ static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t 
   size_t buffsize = sizeof (buffer);
   pn_data_t *body = pn_message_body (data->message);
   pn_data_format (body, buffer, &buffsize);
-
   ROW_START ();
-  COL_STR ("then_date", formatLocaltime (then));
-  COL_STR ("then_date", formatLocaltime (now));
+  formatLocaltime(then);
+  formatLocaltime(now);
   COL_INT ("count", rows_written);
   COL_TIME ("then_msecs", then);
   COL_TIME ("now_msecs", now);
   COL_TIME ("pause_time",pause_time);
   COL_TIME ("latency", msecs);
   ROW_END ();
-  //fprintf(stdout, "latency %ld\n message: %s", msecs,buffer);
-
-
-  //if (data->debug) fprintf(stdout, "latency %ld\n message: %s", msecs,buffer);
-
-
 
 }
 
