@@ -6,10 +6,10 @@
 all: proton-sender proton-receiver
 
 proton-sender: proton-sender.c
-	gcc -Wall -g -Os $< -lqpid-proton -o $@
+	gcc -Wall -g -Os $< -lqpid-proton -lm -o $@
 
 proton-receiver: proton-receiver.c
-	gcc -Wall -g -Os $< -lqpid-proton -o $@
+	gcc -Wall -g -Os $< -lqpid-proton -lm -o $@
 
 
 .PHONY: clean
