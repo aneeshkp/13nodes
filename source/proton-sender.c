@@ -76,7 +76,7 @@ typedef struct {
     int send_count;
     const char *target;
     size_t msg_len;
-    int sequence;
+    uint64_t sequence;
     int pre_settle;
     uint32_t pause_min_msec;
     uint32_t pause_max_msec;
@@ -164,7 +164,11 @@ static void event_handler(pn_handler_t *handler,
             case PN_MODIFIED:
                 // NACK
                 pn_delivery_settle(dlv);
-                fprintf(stderr, "Message not accepted - code:%lu\n", (unsigned long)rs);
+                fprintf(stderr, "Message not accepted - %s\n",
+                        (rs == PN_REJECTED) ? "REJECTED"
+                        : ((rs == PN_RELEASED) ? "RELEASED"
+                           : "MODIFIED"));
+                // TBD: RELEASED messages should be re-transmitted
                 break;
             default:
                 // ??? no other terminal states defined, so ignore anything else
@@ -244,7 +248,7 @@ static int parse_args(int argc, char *argv[], app_data_t *app)
             break;
         case 't': app->target = optarg; break;
         case 's': app->msg_len = atoi(optarg); break;
-        case 'S': app->sequence = atoi(optarg); break;
+        case 'S': app->sequence = atol(optarg); break;
         case 'p': app->pre_settle = 1; break;
         case 'v': app->debug++; break;
         case 'R': srand(atoi(optarg)); break;
@@ -296,8 +300,8 @@ static int send_message(app_data_t *app_data)
         || pn_link_credit(app_data->sender) <= 0)
         return 0;
 
-    id.type = PN_INT;
-    id.u.as_int = ++app_data->sequence;
+    id.type = PN_ULONG;
+    id.u.as_ulong = app_data->sequence++;
     pn_message_set_id(app_data->message, id);
     if (app_data->latency) {
         pn_message_set_creation_time(app_data->message,

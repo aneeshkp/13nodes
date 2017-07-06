@@ -101,6 +101,9 @@ typedef struct
   char *decode_buffer;
   size_t buffer_len;
   pn_message_t *message;
+  uint64_t expected_sequence;
+  unsigned dropped_msgs;      // based on sequence
+  unsigned duplicate_msgs;    // based on sequence
   time_t start;
   unsigned long received_count;
   // these are all in msec
@@ -252,6 +255,10 @@ static void display_latency (app_data_t * data)
 	      ? (data->total_latency / data->received_count)
 	      : 0, data->min_latency, data->max_latency);
       printf ("  Distribution:\n");
+      if (data->dropped_msgs)
+          printf("  Dropped: %u\n", data->dropped_msgs);
+      if (data->duplicate_msgs)
+          printf("  Duplicate: %u\n", data->duplicate_msgs);
     }
 
   unsigned power = 1;
@@ -364,6 +371,7 @@ static void event_handler (pn_handler_t * handler,
 			pn_message_decode (data->message, data->decode_buffer,
 					   len))
 		      {
+                        pn_atom_t id = pn_message_get_id(data->message);
 			time_t _then =
 			  pn_message_get_creation_time (data->message);
 			if (_then && _then >= data->start &&_now >= _then)
@@ -371,6 +379,31 @@ static void event_handler (pn_handler_t * handler,
 			    print_latency (data, _now - _then, _then, _now);
 			    update_latency (data, _now - _then);
 			  }
+
+                        if (id.type != PN_ULONG) fatal("Bad sequence type: expected ulong");
+                        if (id.u.as_long == data->expected_sequence)
+                          {
+                            ++data->expected_sequence;
+                          }
+                        else
+                          {
+                            if (data->debug)
+                                fprintf(stdout,
+                                        "Sequence mismatch! Expected %lu, got %lu\n",
+                                        data->expected_sequence, id.u.as_long);
+                            if (id.u.as_long > data->expected_sequence)
+                              {
+                                data->dropped_msgs += id.u.as_long - data->expected_sequence;
+                                data->expected_sequence = id.u.as_long + 1;
+                              }
+                            else
+                              {
+                                // older sequence #, likely re-transmit
+                                ++data->duplicate_msgs;
+                                // leave expected_sequence alone - should
+                                // 'catch up'
+                              }
+                          }
 		      }
 		  }
 	      }
@@ -439,6 +472,7 @@ static void usage (const char *name)
   printf ("-l \tEnable latency measurement\n");
   printf ("-u \tOutput in CSV format\n");
   printf ("-p \tpre-fetch window size [100]\n");
+  printf("-S \tExpected first sequence # [0]\n");
 }
 
 
@@ -455,9 +489,10 @@ static int parse_args (int argc, char *argv[], app_data_t * app)
   app->target = "topic";
   app->display_interval_sec = 0;
   app->latency = 0;
+  app->expected_sequence = 0;
 
   opterr = 0;
-  while ((c = getopt (argc, argv, "a:c:t:i:p:luv")) != -1)
+  while ((c = getopt (argc, argv, "a:c:t:i:p:S:luv")) != -1)
     {
       switch (c)
 	{
@@ -488,6 +523,9 @@ static int parse_args (int argc, char *argv[], app_data_t * app)
 	case 'u':
 	  app->dump_csv = 1;
 	  break;
+        case 'S':
+          app->expected_sequence = atol(optarg);
+          break;
 	default:
 	  fprintf (stderr, "Unknown option: %c\n", c);
 	  usage (argv[0]);
@@ -597,7 +635,7 @@ int main (int argc, char *argv[])
   time_t display_interval = app_data->display_interval_sec * 1000;
 
   // pn_reactor_process() returns 'true' until the connection is shut down.
-  while (pn_reactor_process (reactor))
+  while (!done && pn_reactor_process (reactor))
     {
       if (display_interval)
 	{
@@ -607,13 +645,6 @@ int main (int argc, char *argv[])
 	      last_display = _now;
 	      display_latency (app_data);
 	    }
-	}
-      if (done
-	  || (app_data->message_count > 0
-	      && app_data->received_count >= app_data->message_count))
-	{
-	  done = 0;
-	  pn_link_close (app_data->receiver);
 	}
     }
 
