@@ -25,6 +25,7 @@
 #include <limits.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <errno.h>
 
 #include "proton/reactor.h"
 #include "proton/message.h"
@@ -40,9 +41,13 @@
 
 static void fatal(const char *str)
 {
-    perror(str);
+    if (errno)
+        perror(str);
+    else
+        fprintf(stderr, "Error: %s\n", str);
+
     fflush(stderr);
-    abort();
+    exit(1);
 }
 
 static int done = 0;
@@ -336,6 +341,7 @@ int main(int argc, char *argv[])
     pn_url_t *url = NULL;
     pn_connection_t *conn = NULL;
 
+    errno = 0;
     signal(SIGINT, stop);
 
     /* Create a handler for the connection's events.  event_handler() will be
