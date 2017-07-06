@@ -42,7 +42,7 @@
 #define ROW_START()        do {} while (0)
 
 #define COL_HDR(NAME)      printf("| %20.20s", (NAME))
-
+#define COL_ID(NAME,VAL) printf("| %20ld",(VAL))
 #define COL_INT(NAME,VAL)  printf("| %20d", (VAL))
 #define COL_TIME(NAME,VAL) printf("| %20ld ", (VAL))
 #define COL_CLOCK(NAME,VALS,VALD) printf("| %20s.%ld",(VALS),(VALD))
@@ -152,7 +152,7 @@ static void formatLocaltime (unsigned long long  _time)
   
 }
 
-static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t now)
+static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t now,long id)
 {
 
 
@@ -168,6 +168,7 @@ static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t 
       ROW_START ();
       COL_HDR ("THEN DATE");
       COL_HDR ("NOW DATA");
+      COL_HDR("ID");
       COL_HDR ("COUNT");
       COL_HDR ("THEN");
       COL_HDR ("NOW");
@@ -184,6 +185,7 @@ static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t 
   ROW_START ();
   formatLocaltime(then);
   formatLocaltime(now);
+  COL_ID("id",id);
   COL_INT ("count", rows_written);
   COL_TIME ("then_msecs", then);
   COL_TIME ("now_msecs", now);
@@ -376,7 +378,7 @@ static void event_handler (pn_handler_t * handler,
 			  pn_message_get_creation_time (data->message);
 			if (_then && _then >= data->start &&_now >= _then)
 			  {
-			    print_latency (data, _now - _then, _then, _now);
+			    print_latency (data, _now - _then, _then, _now,id.u.as_long);
 			    update_latency (data, _now - _then);
 			  }
 
