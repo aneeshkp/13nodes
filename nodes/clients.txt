@@ -1,9 +1,3 @@
-nfvha-comp-07.oot.lab.eng.bos
-nfvha-comp-06.oot.lab.eng.bos
-nfvha-comp-05.oot.lab.eng.bos
-nfvha-comp-04.oot.lab.eng.bos
-nfvha-comp-03.oot.lab.eng.bos
-nfvha-comp-02.oot.lab.eng.bos
-nfvha-comp-01.oot.lab.eng.bos
-nfvha-ctrl-03.oot.lab.eng.bos
-
+10.19.110.1
+10.19.110.9
+10.19.110.19
