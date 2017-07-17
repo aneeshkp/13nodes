@@ -204,7 +204,6 @@ static void usage(const char *name)
     printf("-c \t# of messages to send (-1==forever) [1]\n");
     printf("-t \tTopic address [topic]\n");
     printf("-s \tMessage size [64]\n");
-    printf("-S \tSequence number start [0]\n");
     printf("-p \tDo not block for ACKs\n");
     printf("-v \tIncrease debug verbosity\n");
     printf("-R \tRandom seed [time]\n");
@@ -227,7 +226,6 @@ static int parse_args(int argc, char *argv[], app_data_t *app)
     app->send_count = 1;
     app->target = "topic";
     app->msg_len = 64;
-    app->sequence = 0;
     app->pre_settle = 0;
     app->pause_min_msec = 0;
     app->pause_max_msec = 0;
@@ -247,7 +245,6 @@ static int parse_args(int argc, char *argv[], app_data_t *app)
             break;
         case 't': app->target = optarg; break;
         case 's': app->msg_len = atoi(optarg); break;
-        case 'S': app->sequence = atol(optarg); break;
         case 'p': app->pre_settle = 1; break;
         case 'v': app->debug++; break;
         case 'R': srand(atoi(optarg)); break;

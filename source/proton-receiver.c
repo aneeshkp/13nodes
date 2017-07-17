@@ -55,6 +55,7 @@
                         } while (0)
 
 
+static bool bad_clock = false;
 static int done = 0;
 static void
 stop (int sig)
@@ -94,6 +95,10 @@ typedef struct
   uint64_t expected_sequence;
   unsigned dropped_msgs;      // based on sequence
   unsigned duplicate_msgs;    // based on sequence
+  unsigned old_msgs;          // sent before receiver started (ignored)
+  unsigned future_msgs;       // sent time > now, likely clock inaccurate
+  unsigned no_time_msgs;      // message did not contain a timestamp
+
   time_t start;
   unsigned long received_count;
   // these are all in msec
@@ -139,6 +144,7 @@ static void formatLocaltime (unsigned long long  _time)
 
 static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t now,long id)
 {
+  return;
 
 
   static int rows_written = 0;
@@ -247,6 +253,12 @@ static void display_latency (app_data_t * data)
           printf("  Dropped: %u\n", data->dropped_msgs);
       if (data->duplicate_msgs)
           printf("  Duplicate: %u\n", data->duplicate_msgs);
+      if (data->old_msgs)
+          printf("  Stale msgs: %u\n", data->old_msgs);
+      if (data->future_msgs)
+          printf("  Bad Clock msgs: %u\n", data->future_msgs);
+      if (data->no_time_msgs)
+          printf("  Missing Timestamp msgs: %u\n", data->no_time_msgs);
       printf ("  Distribution:\n");
     }
 
@@ -280,6 +292,70 @@ static void display_latency (app_data_t * data)
   last_count = data->received_count;
 }
 
+
+/* handle the received message
+ */
+static void process_message(app_data_t *data, const time_t now)
+{
+  pn_atom_t id = pn_message_get_id(data->message);
+  const time_t then = pn_message_get_creation_time (data->message);
+  const uint64_t recv_seq = id.u.as_long;
+
+ if (data->debug)
+   fprintf (stdout, "Message received!\n");
+
+ ++data->received_count;
+
+ if (then)
+   {
+     if (then < data->start)
+       {
+         // message is old - sent before the link came up.  Likely buffered in
+         // qdrouterd before receiver started
+         ++data->old_msgs;
+       }
+     else if (now < then)
+       {
+         // likely clocks are not synchronized between sender and receiver
+         ++data->future_msgs;
+         if (!bad_clock)
+           {
+             bad_clock = true;
+             fprintf(stderr, "Received timestamp < current time -"
+                     " likely client clocks are NOT SYNCHRONIZED!\n");
+           }
+       }
+     else
+       {
+         print_latency (data, now - then, then, now, recv_seq);
+         update_latency (data, now - then);
+
+         // recv_seq == 0 indicates a restart of the sender (not an error)
+         if (recv_seq != 0 && recv_seq != data->expected_sequence)
+           {
+             if (data->debug)
+               fprintf(stdout, "Sequence mismatch! Expected %lu, got %lu\n",
+                       data->expected_sequence, recv_seq);
+
+             if (recv_seq > data->expected_sequence)
+               {
+                 data->dropped_msgs += recv_seq - data->expected_sequence;
+               }
+             else  // older sequence #, likely re-transmit
+               {
+                 ++data->duplicate_msgs;
+               }
+           }
+         data->expected_sequence = recv_seq + 1;
+       }
+   }
+ else  //  missing timestamp
+   {
+     if (data->debug)
+       fprintf (stdout, "dropping message - no timestamp\n");
+     ++data->no_time_msgs;
+   }
+}
 
 /* Process interesting events posted by the reactor.
  * This is called from pn_reactor_process()
@@ -323,6 +399,8 @@ static void event_handler (pn_handler_t * handler,
       {
         // discard any messages generated before the link becomes active
         data->start = now();
+        data->expected_sequence = 0;    // set by first incoming msg
+        bad_clock = false;
       }
       break;
 
@@ -368,54 +446,9 @@ static void event_handler (pn_handler_t * handler,
 		    if (PN_OK ==
 			pn_message_decode (data->message, data->decode_buffer,
 					   len))
-		      {
-                        pn_atom_t id = pn_message_get_id(data->message);
-			time_t _then =
-			  pn_message_get_creation_time (data->message);
-
-                        if (data->debug)
-                            fprintf (stdout, "Message received!\n");
-
-                        ++data->received_count;
-
-			if (_then && _then >= data->start &&_now >= _then)
-			  {
-			    print_latency (data, _now - _then, _then, _now,id.u.as_long);
-			    update_latency (data, _now - _then);
-
-                            if (id.type == PN_ULONG)  // contains sequence #
-                              {
-                                if (id.u.as_long == data->expected_sequence)
-                                  {
-                                    ++data->expected_sequence;
-                                  }
-                                else
-                                  {
-                                    if (data->debug)
-                                      fprintf(stdout,
-                                              "Sequence mismatch! Expected %lu, got %lu\n",
-                                              data->expected_sequence, id.u.as_long);
-                                    if (id.u.as_long > data->expected_sequence)
-                                      {
-                                        data->dropped_msgs += id.u.as_long - data->expected_sequence;
-                                        data->expected_sequence = id.u.as_long + 1;
-                                      }
-                                    else  // older sequence #, likely re-transmit
-                                      {
-                                        ++data->duplicate_msgs;
-                                        // leave expected_sequence alone - should
-                                        // 'catch up'
-                                      }
-                                  }
-                              }
-			  }
-                        else  // bad or missing timestamp
-                          {
-                            if (data->debug)
-                                fprintf (stdout, "dropping message - bad timestamp\n");
-                            data->dropped_msgs++;
-                          }
-		      }
+                      {
+                        process_message (data, _now);
+                      }
 		  }
 	      }
 
@@ -481,7 +514,6 @@ static void usage (const char *name)
   printf ("-l \tEnable latency measurement\n");
   printf ("-u \tOutput in CSV format\n");
   printf ("-p \tpre-fetch window size [100]\n");
-  printf ("-S \tExpected first sequence # [0]\n");
 }
 
 
@@ -499,7 +531,6 @@ static int parse_args (int argc, char *argv[], app_data_t * app)
   app->target = "topic";
   app->display_interval_sec = 0;
   app->latency = 0;
-  app->expected_sequence = 0;
 
   opterr = 0;
   while ((c = getopt (argc, argv, "a:c:t:i:p:S:luv")) != -1)
@@ -533,9 +564,6 @@ static int parse_args (int argc, char *argv[], app_data_t * app)
 	case 'u':
 	  app->dump_csv = 1;
 	  break;
-        case 'S':
-          app->expected_sequence = atol(optarg);
-          break;
 	default:
 	  fprintf (stderr, "Unknown option: %c\n", c);
 	  usage (argv[0]);
