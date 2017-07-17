@@ -144,7 +144,7 @@ static void formatLocaltime (unsigned long long  _time)
 
 static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t now,long id)
 {
-  return;
+//  return;
 
 
   static int rows_written = 0;
