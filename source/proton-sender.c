@@ -38,17 +38,7 @@
 #include "proton/transport.h"
 #include "proton/url.h"
 
-
-static void fatal(const char *str)
-{
-    if (errno)
-        perror(str);
-    else
-        fprintf(stderr, "Error: %s\n", str);
-
-    fflush(stderr);
-    exit(1);
-}
+#include "proton-common.h"
 
 static int done = 0;
 static void stop(int sig)
@@ -72,7 +62,7 @@ static time_t now()
 //
 typedef struct {
     int debug;
-    const char *host_address;
+    hosts_t host_addresses;
     int send_count;
     const char *target;
     size_t msg_len;
@@ -85,6 +75,7 @@ typedef struct {
     pn_message_t *message;
     char *encode_buffer;
     size_t buffer_len;
+    int reconnects;
 } app_data_t;
 
 // helper to pull pointer to app_data_t instance out of the pn_handler_t
@@ -96,11 +87,6 @@ typedef struct {
 static void delete_handler(pn_handler_t *handler)
 {
     app_data_t *app_data = GET_APP_DATA(handler);
-    if (app_data->sender) {
-        pn_decref(app_data->sender);
-        app_data->sender = NULL;
-    }
-
     if (app_data->message) {
         pn_decref(app_data->message);
         app_data->message = NULL;
@@ -119,6 +105,9 @@ static void event_handler(pn_handler_t *handler,
 {
     app_data_t *data = GET_APP_DATA(handler);
 
+    //if (data->debug)
+    //    fprintf(stdout, "Event received: %s\n", pn_event_type_name(type));
+
     switch (type) {
 
     case PN_CONNECTION_INIT: {
@@ -131,10 +120,17 @@ static void event_handler(pn_handler_t *handler,
         ssn = pn_session(conn);
         pn_session_open(ssn);
         data->sender = pn_sender(ssn, "MySender");
+        pn_incref(data->sender);
         pn_link_set_snd_settle_mode(data->sender, PN_SND_MIXED);
         pn_terminus_set_address(pn_link_target(data->sender), data->target);
         pn_link_open(data->sender);
     } break;
+
+    case PN_CONNECTION_UNBOUND:
+        pn_decref(data->sender);
+        data->sender = NULL;
+        pn_connection_release(pn_event_connection(event));
+        break;
 
     case PN_LINK_REMOTE_CLOSE: {
         // shutdown - clean up connection and session..
@@ -222,11 +218,12 @@ static void usage(const char *name)
 static int parse_args(int argc, char *argv[], app_data_t *app)
 {
     int c;
+    char default_host[15] = "localhost:5672";
 
     // set defaults:
     srand((unsigned int)now());
     app->debug = 0;
-    app->host_address = "localhost:5672";
+    hosts_init(&app->host_addresses, default_host);
     app->send_count = 1;
     app->target = "topic";
     app->msg_len = 64;
@@ -242,7 +239,9 @@ static int parse_args(int argc, char *argv[], app_data_t *app)
         case 'h':
             usage(argv[0]);
             return -1;
-        case 'a': app->host_address = optarg; break;
+        case 'a':
+            hosts_init(&app->host_addresses, optarg);
+            break;
         case 'c':
             app->send_count = atoi(optarg);
             break;
@@ -267,7 +266,6 @@ static int parse_args(int argc, char *argv[], app_data_t *app)
 
     if (app->debug) {
         fprintf(stdout, "Configuration:\n"
-                " Bus: %s\n"
                 " Count: %d\n"
                 " Topic: %s\n"
                 " Length: %zd\n"
@@ -275,10 +273,18 @@ static int parse_args(int argc, char *argv[], app_data_t *app)
                 " Pause (msec): %d min\n"
                 "               %d max\n"
                 " Timestamp: %s\n",
-                app->host_address, app->send_count, app->target,
+                app->send_count, app->target,
                 app->msg_len, (app->pre_settle) ? "yes" : "no",
                 app->pause_min_msec, app->pause_max_msec,
                 (app->latency) ? "enabled" : "disabled");
+        fprintf (stdout,
+                 "  Host(s):");
+        for (int i = 0; i < app->host_addresses.count; i++)
+            fprintf (stdout,
+                     "%s %s",
+                     (i == 0) ? "" : ",",
+                     app->host_addresses.hosts[i]);
+        fprintf (stdout, "\n");
     }
 
     return 0;
@@ -341,10 +347,6 @@ static int send_message(app_data_t *app_data)
 
 int main(int argc, char *argv[])
 {
-    pn_reactor_t *reactor = NULL;
-    pn_url_t *url = NULL;
-    pn_connection_t *conn = NULL;
-
     errno = 0;
     signal(SIGINT, stop);
 
@@ -396,70 +398,86 @@ int main(int argc, char *argv[])
     }
     pn_data_rewind(body);
 
-    reactor = pn_reactor();
+    while (!done && app_data->send_count != 0) {
 
-    url = pn_url_parse(app_data->host_address);
-    if (url == NULL) {
-        fprintf(stderr, "Invalid host address %s\n", app_data->host_address);
-        exit(1);
-    }
-    conn = pn_reactor_connection_to_host(reactor,
-                                         pn_url_get_host(url),
-                                         pn_url_get_port(url),
-                                         handler);
-    if (!conn) fatal("cannot create connection");
+        pn_reactor_t *reactor = pn_reactor();
+        const char *host = hosts_get (&app_data->host_addresses);
+        pn_url_t *url = pn_url_parse (host);
 
-    pn_decref(url);
-    pn_decref(handler);
+        if (url == NULL)
+          {
+            fprintf (stderr, "Invalid host address %s\n", host);
+            exit (1);
+          }
 
-    // the container name should be unique for each client
-    // attached to the broker
-    {
-        char hname[HOST_NAME_MAX+1];
-        char cname[256];
+        if (app_data->debug)
+            fprintf(stdout, "Connecting to %s...\n", host);
 
-        gethostname(hname, sizeof(hname));
-        snprintf(cname, sizeof(cname), "sender-container-%s-%d-%d",
-                 hname, getpid(), rand());
+        pn_connection_t *conn = pn_reactor_connection_to_host(reactor,
+                                                              pn_url_get_host(url),
+                                                              pn_url_get_port(url),
+                                                              handler);
+        if (!conn) fatal("cannot create connection");
 
-        pn_connection_set_container(conn, cname);
-    }
+        pn_decref(url);
 
-    // make pn_reactor_process() non-blocking
-    pn_reactor_set_timeout(reactor, 0);
-    pn_reactor_start(reactor);
+        // the container name should be unique for each client
+        // attached to the broker
+        {
+            char hname[HOST_NAME_MAX+1];
+            char cname[256];
 
-    time_t next_transmit = now();
-    // pn_reactor_process() returns 'true' until the connection is shut down.
-    while (!done && pn_reactor_process(reactor)) {
-        time_t n = now();
-        if (n >= next_transmit) {
-            // pause interval expired, send a message
-            if (app_data->send_count && send_message(app_data) > 0) {
-                // message sent, update deadline for next transmit
-                unsigned int pause = 0;
-                if (app_data->pause_max_msec)
-                    pause = rand() % app_data->pause_max_msec;
-                if (app_data->pause_min_msec) {
-                    pause += app_data->pause_min_msec;
-                    pause -= pause % app_data->pause_min_msec;
-                }
-                pn_reactor_set_timeout(reactor, pause);
-                if (app_data->debug)
-                    fprintf(stdout, "Random delay: %u msec\n", pause);
-                next_transmit = now() + pause;
+            gethostname(hname, sizeof(hname));
+            snprintf(cname, sizeof(cname), "sender-container-%s-%d-%d",
+                     hname, getpid(), rand());
 
-                if (app_data->send_count > 0 && --app_data->send_count == 0) {
-                    // this starts the shutdown process
-                    pn_link_close(app_data->sender);
-                }
-            }
-        } else {
-            // adjust timeout to account for elapsed time
-            pn_reactor_set_timeout(reactor, next_transmit - n);
+            pn_connection_set_container(conn, cname);
         }
+
+        // make pn_reactor_process() non-blocking
+        pn_reactor_set_timeout(reactor, 0);
+        pn_reactor_start(reactor);
+
+        time_t next_transmit = now();
+        // pn_reactor_process() returns 'true' until the connection is shut down.
+        while (!done && pn_reactor_process(reactor)) {
+            time_t n = now();
+            if (n >= next_transmit) {
+                // pause interval expired, send a message
+                if (app_data->send_count && send_message(app_data) > 0) {
+                    // message sent, update deadline for next transmit
+                    unsigned int pause = 0;
+                    if (app_data->pause_max_msec)
+                        pause = rand() % app_data->pause_max_msec;
+                    if (app_data->pause_min_msec) {
+                        pause += app_data->pause_min_msec;
+                        pause -= pause % app_data->pause_min_msec;
+                    }
+                    pn_reactor_set_timeout(reactor, pause);
+                    if (app_data->debug)
+                        fprintf(stdout, "Random delay: %u msec\n", pause);
+                    next_transmit = now() + pause;
+
+                    if (app_data->send_count > 0 && --app_data->send_count == 0) {
+                        // this starts the shutdown process
+                        pn_link_close(app_data->sender);
+                    }
+                }
+            } else {
+                // adjust timeout to account for elapsed time
+                pn_reactor_set_timeout(reactor, next_transmit - n);
+            }
+        }
+        pn_reactor_free (reactor);
+
+        // if the connection closed, but we're still not done, try to reconnect
+        if (!done && app_data->send_count != 0)
+          {
+            sleep (1);  // prevent busy loop
+            app_data->reconnects++;
+          }
     }
-    pn_decref(reactor);
+    pn_decref (handler);
 
     return 0;
 }

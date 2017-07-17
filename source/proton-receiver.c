@@ -39,6 +39,8 @@
 #include "proton/url.h"
 #include <time.h>
 
+#include "proton-common.h"
+
 #define ROW_START()        do {} while (0)
 
 #define COL_HDR(NAME)      printf("| %20.20s", (NAME))
@@ -52,17 +54,6 @@
                                 rows_written++; \
                         } while (0)
 
-
-static void fatal (const char *str)
-{
-  if (errno)
-    perror(str);
-  else
-    fprintf(stderr, "Error: %s\n", str);
-
-  fflush(stderr);
-  exit(1);
-}
 
 static int done = 0;
 static void
@@ -89,7 +80,7 @@ static time_t now ()
 typedef struct
 {
   int debug;
-  const char *host_address;
+  hosts_t host_addresses;
   int message_count;
   int pre_fetch;
   const char *target;
@@ -97,7 +88,6 @@ typedef struct
   int latency;
   long int last_then; 
   int dump_csv;
-  pn_link_t *receiver;
   char *decode_buffer;
   size_t buffer_len;
   pn_message_t *message;
@@ -114,6 +104,7 @@ typedef struct
 #define MAX_ORDER 4
   unsigned distribution[MAX_ORDER][100];
   unsigned overflow;
+  unsigned reconnects;
 } app_data_t;
 
 // helper to pull pointer to app_data_t instance out of the pn_handler_t
@@ -125,12 +116,6 @@ typedef struct
 static void delete_handler (pn_handler_t * handler)
 {
   app_data_t *app_data = GET_APP_DATA (handler);
-  if (app_data->receiver)
-    {
-      pn_decref (app_data->receiver);
-      app_data->receiver = NULL;
-    }
-
   if (app_data->message)
     {
       pn_decref (app_data->message);
@@ -256,11 +241,13 @@ static void display_latency (app_data_t * data)
 	      (data->received_count)
 	      ? (data->total_latency / data->received_count)
 	      : 0, data->min_latency, data->max_latency);
-      printf ("  Distribution:\n");
+      if (data->reconnects)
+          printf("  Reconnect attempts: %u\n", data->reconnects);
       if (data->dropped_msgs)
           printf("  Dropped: %u\n", data->dropped_msgs);
       if (data->duplicate_msgs)
           printf("  Duplicate: %u\n", data->duplicate_msgs);
+      printf ("  Distribution:\n");
     }
 
   unsigned power = 1;
@@ -302,6 +289,9 @@ static void event_handler (pn_handler_t * handler,
 {
   app_data_t *data = GET_APP_DATA (handler);
 
+  //if (data->debug)
+  //    fprintf(stdout, "Event received: %s\n", pn_event_type_name(type));
+
   switch (type)
     {
 
@@ -310,19 +300,24 @@ static void event_handler (pn_handler_t * handler,
 	// reactor is ready, create a link to the broker
 	pn_connection_t *conn;
 	pn_session_t *ssn;
+        pn_link_t *receiver;
 
 	conn = pn_event_connection (event);
 	pn_connection_open (conn);
 	ssn = pn_session (conn);
 	pn_session_open (ssn);
-	data->receiver = pn_receiver (ssn, "MyReceiver");
-	pn_terminus_set_address (pn_link_source (data->receiver),
+	receiver = pn_receiver (ssn, "MyReceiver");
+	pn_terminus_set_address (pn_link_source (receiver),
 				 data->target);
-	pn_link_open (data->receiver);
+	pn_link_open (receiver);
 	// cannot receive without granting credit:
-	pn_link_flow (data->receiver, data->pre_fetch);
+	pn_link_flow (receiver, data->pre_fetch);
       }
       break;
+
+    case PN_CONNECTION_UNBOUND:
+        pn_connection_release(pn_event_connection(event));
+        break;
 
     case PN_LINK_REMOTE_OPEN:
       {
@@ -344,6 +339,7 @@ static void event_handler (pn_handler_t * handler,
       {
 	// A message has been received
 	pn_delivery_t *dlv = pn_event_delivery (event);
+        pn_link_t *receiver = pn_event_link (event);
 	if (pn_delivery_readable (dlv) && !pn_delivery_partial (dlv))
 	  {
 	    // A full message has arrived
@@ -363,7 +359,7 @@ static void event_handler (pn_handler_t * handler,
 
 		// read in the raw data
 		len =
-		  pn_link_recv (data->receiver, data->decode_buffer,
+		  pn_link_recv (receiver, data->decode_buffer,
 				data->buffer_len);
 		if (len > 0)
 		  {
@@ -376,43 +372,52 @@ static void event_handler (pn_handler_t * handler,
                         pn_atom_t id = pn_message_get_id(data->message);
 			time_t _then =
 			  pn_message_get_creation_time (data->message);
+
+                        if (data->debug)
+                            fprintf (stdout, "Message received!\n");
+
+                        ++data->received_count;
+
 			if (_then && _then >= data->start &&_now >= _then)
 			  {
 			    print_latency (data, _now - _then, _then, _now,id.u.as_long);
 			    update_latency (data, _now - _then);
-			  }
 
-                        if (id.type != PN_ULONG) fatal("Bad sequence type: expected ulong");
-                        if (id.u.as_long == data->expected_sequence)
-                          {
-                            ++data->expected_sequence;
-                          }
-                        else
+                            if (id.type == PN_ULONG)  // contains sequence #
+                              {
+                                if (id.u.as_long == data->expected_sequence)
+                                  {
+                                    ++data->expected_sequence;
+                                  }
+                                else
+                                  {
+                                    if (data->debug)
+                                      fprintf(stdout,
+                                              "Sequence mismatch! Expected %lu, got %lu\n",
+                                              data->expected_sequence, id.u.as_long);
+                                    if (id.u.as_long > data->expected_sequence)
+                                      {
+                                        data->dropped_msgs += id.u.as_long - data->expected_sequence;
+                                        data->expected_sequence = id.u.as_long + 1;
+                                      }
+                                    else  // older sequence #, likely re-transmit
+                                      {
+                                        ++data->duplicate_msgs;
+                                        // leave expected_sequence alone - should
+                                        // 'catch up'
+                                      }
+                                  }
+                              }
+			  }
+                        else  // bad or missing timestamp
                           {
                             if (data->debug)
-                                fprintf(stdout,
-                                        "Sequence mismatch! Expected %lu, got %lu\n",
-                                        data->expected_sequence, id.u.as_long);
-                            if (id.u.as_long > data->expected_sequence)
-                              {
-                                data->dropped_msgs += id.u.as_long - data->expected_sequence;
-                                data->expected_sequence = id.u.as_long + 1;
-                              }
-                            else
-                              {
-                                // older sequence #, likely re-transmit
-                                ++data->duplicate_msgs;
-                                // leave expected_sequence alone - should
-                                // 'catch up'
-                              }
+                                fprintf (stdout, "dropping message - bad timestamp\n");
+                            data->dropped_msgs++;
                           }
 		      }
 		  }
 	      }
-
-	    if (data->debug)
-	      fprintf (stdout, "Message received!\n");
-	    ++data->received_count;
 
 	    if (!pn_delivery_settled (dlv))
 	      {
@@ -422,19 +427,21 @@ static void event_handler (pn_handler_t * handler,
 	      }
 
 	    // done with the delivery, move to the next and free it
-	    pn_link_advance (data->receiver);
+	    pn_link_advance (receiver);
 	    pn_delivery_settle (dlv);	// dlv is now freed
-
-	    // replenish credit if it drops below 1/2 prefetch level
-	    int credit = pn_link_credit (data->receiver);
-	    if (credit < data->pre_fetch / 2)
-	      pn_link_flow (data->receiver, data->pre_fetch - credit);
 
 	    if (data->message_count > 0 && --data->message_count == 0)
 	      {
 		// done receiving, close the endpoints
-		pn_link_close (data->receiver);
+		pn_link_close (receiver);
 	      }
+            else
+              {
+                // replenish credit if it drops below 1/2 prefetch level
+                int credit = pn_link_credit (receiver);
+                if (credit < data->pre_fetch / 2)
+                    pn_link_flow (receiver, data->pre_fetch - credit);
+              }
 	  }
       }
       break;
@@ -474,7 +481,7 @@ static void usage (const char *name)
   printf ("-l \tEnable latency measurement\n");
   printf ("-u \tOutput in CSV format\n");
   printf ("-p \tpre-fetch window size [100]\n");
-  printf("-S \tExpected first sequence # [0]\n");
+  printf ("-S \tExpected first sequence # [0]\n");
 }
 
 
@@ -482,10 +489,11 @@ static void usage (const char *name)
 static int parse_args (int argc, char *argv[], app_data_t * app)
 {
   int c;
+  char default_host[15] = "localhost:5672";
 
   // set defaults:
   app->debug = 0;
-  app->host_address = "localhost:5672";
+  hosts_init(&app->host_addresses, default_host);
   app->message_count = 1;
   app->pre_fetch = 100;
   app->target = "topic";
@@ -502,7 +510,7 @@ static int parse_args (int argc, char *argv[], app_data_t * app)
 	  usage (argv[0]);
 	  return -1;
 	case 'a':
-	  app->host_address = optarg;
+          hosts_init(&app->host_addresses, optarg);
 	  break;
 	case 'c':
 	  app->message_count = atoi (optarg);
@@ -544,37 +552,74 @@ static int parse_args (int argc, char *argv[], app_data_t * app)
   if (app->debug)
     {
       fprintf (stdout, "Configuration:\n"
-	       " Bus: %s\n"
 	       " Count: %d\n"
 	       " Topic: %s\n"
 	       " Display Intrv: %d\n"
 	       " Latency: %s\n"
 	       " Pre-fetch: %d\n",
-	       app->host_address, app->message_count, app->target,
+	       app->message_count, app->target,
 	       app->display_interval_sec,
 	       (app->latency) ? "enabled" : "disabled", app->pre_fetch);
+      fprintf (stdout,
+               "  Host(s):");
+      for (int i = 0; i < app->host_addresses.count; i++)
+          fprintf (stdout,
+                   "%s %s",
+                   (i == 0) ? "" : ",",
+                   app->host_addresses.hosts[i]);
+      fprintf (stdout, "\n");
     }
 
   return 0;
 }
 
 
+// create a connection to the server
+static void connect (app_data_t *data, pn_reactor_t *reactor, pn_handler_t *handler)
+{
+  pn_connection_t *conn = NULL;
+  const char *host = hosts_get (&data->host_addresses);
+  pn_url_t *url = pn_url_parse (host);
+
+  if (url == NULL)
+    {
+      fprintf (stderr, "Invalid host address %s\n", host);
+      exit (1);
+    }
+
+  if (data->debug) fprintf(stdout, "Connecting to %s...\n", host);
+  conn = pn_reactor_connection_to_host (reactor,
+                                        pn_url_get_host (url),
+                                        pn_url_get_port (url),
+                                        handler);
+  pn_decref (url);
+
+  // the container name should be unique for each client
+  // attached to the broker
+  {
+    char hname[HOST_NAME_MAX + 1] = "<unknown host>";
+    char cname[256];
+
+    gethostname (hname, sizeof (hname));
+    snprintf (cname, sizeof (cname), "receiver-container-%s-%d-%d",
+	      hname, getpid (), rand ());
+
+    pn_connection_set_container (conn, cname);
+  }
+}
+
+
 int main (int argc, char *argv[])
 {
-  pn_reactor_t *reactor = NULL;
-  pn_url_t *url = NULL;
-  pn_connection_t *conn = NULL;
-
   errno = 0;
   signal (SIGINT, stop);
 
   /* Create a handler for the connection's events.  event_handler() will be
-   * called for each event and delete_handler will be called when the
-   * connection is released.  The handler will allocate an app_data_t
+   * called for each event.  The handler will keep a pointer to the app_data
    * instance which can be accessed when the event_handler is called.
    */
   pn_handler_t *handler = pn_handler_new (event_handler,
-					  sizeof (app_data_t),
+                                          sizeof (app_data_t),
 					  delete_handler);
 
   /* set up the application data with defaults */
@@ -599,55 +644,40 @@ int main (int argc, char *argv[])
     pn_decref (handshaker);
   }
 
-  reactor = pn_reactor ();
 
-  url = pn_url_parse (app_data->host_address);
-  if (url == NULL)
+  while (!done && app_data->message_count != 0)
     {
-      fprintf (stderr, "Invalid host address %s\n", app_data->host_address);
-      exit (1);
-    }
-  conn = pn_reactor_connection_to_host (reactor,
-					pn_url_get_host (url),
-					pn_url_get_port (url), handler);
-  if (!conn)
-    fatal ("cannot create connection");
+      time_t last_display = now ();
+      time_t display_interval = app_data->display_interval_sec * 1000;
+      pn_reactor_t *reactor = pn_reactor ();
 
-  pn_decref (url);
-  pn_decref (handler);
+      // make pn_reactor_process() wake up every second
+      pn_reactor_set_timeout (reactor, 1000);
+      pn_reactor_start (reactor);
 
-  // the container name should be unique for each client
-  // attached to the broker
-  {
-    char hname[HOST_NAME_MAX + 1];
-    char cname[256];
+      connect(app_data, reactor, handler);
 
-    gethostname (hname, sizeof (hname));
-    snprintf (cname, sizeof (cname), "receiver-container-%s-%d-%d",
-	      hname, getpid (), rand ());
+      // pn_reactor_process() returns 'true' until the connection is shut down.
+      while (!done && pn_reactor_process (reactor))
+        {
+          if (display_interval)
+            {
+              time_t _now = now ();
+              if (_now >= last_display + display_interval)
+                {
+                  last_display = _now;
+                  display_latency (app_data);
+                }
+            }
+        }
+      pn_reactor_free (reactor);
 
-    pn_connection_set_container (conn, cname);
-  }
-
-  // make pn_reactor_process() wake up every second
-  pn_reactor_set_timeout (reactor, 1000);
-  pn_reactor_start (reactor);
-
-  time_t last_display = now ();
-  time_t display_interval = app_data->display_interval_sec * 1000;
-
-  // pn_reactor_process() returns 'true' until the connection is shut down.
-  while (!done && pn_reactor_process (reactor))
-    {
-      if (display_interval)
-	{
-	  time_t _now = now ();
-	  if (_now >= last_display + display_interval)
-	    {
-	      last_display = _now;
-	      display_latency (app_data);
-	    }
-	}
+      // if the connection closed, but we're still not done, try to reconnect
+      if (!done && app_data->message_count != 0)
+        {
+          sleep (1);  // prevent busy loop
+          app_data->reconnects++;
+        }
     }
 
   if (app_data->latency)
@@ -655,7 +685,7 @@ int main (int argc, char *argv[])
       display_latency (app_data);
     }
 
-  pn_decref (reactor);
+  pn_decref (handler);
 
   return 0;
 }
