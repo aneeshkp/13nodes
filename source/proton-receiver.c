@@ -55,6 +55,7 @@
                         } while (0)
 
 
+static int outlier_threshold = 10;  // msec
 static bool bad_clock = false;
 static int done = 0;
 static void
@@ -144,15 +145,17 @@ static void formatLocaltime (unsigned long long  _time)
 
 static void print_latency (app_data_t * data, time_t msecs, time_t then, time_t now,long id)
 {
-//  return;
-
-
   static int rows_written = 0;
   long int pause_time=0;
   if(data->last_then)
      pause_time=then-data->last_then;
   data->last_then=then;
 
+  // avoid displaying anything if the latency is in the acceptable range
+  if (msecs < outlier_threshold)
+    {
+      return;
+    }
 
   if (!rows_written)
     {
